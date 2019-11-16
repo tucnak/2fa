@@ -73,7 +73,6 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -106,7 +105,9 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	k := readKeychain(filepath.Join(os.Getenv("HOME"), ".2fa"))
+	k := readKeychain(os.Getenv("2FA_KEYCHAIN"))
+	fmt.Println(k.file)
+	fmt.Println()
 
 	if *flagList {
 		if flag.NArg() != 0 {
