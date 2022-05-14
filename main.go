@@ -105,7 +105,15 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	k := readKeychain(os.Getenv("2FA_KEYCHAIN"))
+	var keyfile string = os.Getenv("KEYS_2FA")
+	if keyfile == "" {
+		home := os.Getenv("HOME")
+		if home != "" {
+			panic("neither $KEYS nor $HOME has been set")
+		}
+		keyfile = home + "/.2fa"
+	}
+	k := readKeychain(keyfile)
 	fmt.Println(k.file)
 	fmt.Println()
 

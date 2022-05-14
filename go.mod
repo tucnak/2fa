@@ -1,4 +1,4 @@
-module rsc.io/2fa
+module github.com/tucnak/2fa
 
 go 1.16
 
