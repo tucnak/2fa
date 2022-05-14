@@ -70,6 +70,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"github.com/keybase/go-keychain"
 	"io/ioutil"
 	"log"
 	"os"
@@ -83,40 +84,36 @@ import (
 )
 
 var (
-	flagAdd  = flag.Bool("add", false, "add a key")
-	flagList = flag.Bool("list", false, "list keys")
-	flagHotp = flag.Bool("hotp", false, "add key as HOTP (counter-based) key")
-	flag7    = flag.Bool("7", false, "generate 7-digit code")
-	flag8    = flag.Bool("8", false, "generate 8-digit code")
-	flagClip = flag.Bool("clip", false, "copy code to the clipboard")
+	flagAdd    = flag.Bool("add", false, "[-7] [-8] [-hotp] keyname")
+	flagList   = flag.Bool("list", false, "list keys")
+	flagHotp   = flag.Bool("hotp", false, "add key as HOTP (counter-based) key")
+	flag7      = flag.Bool("7", false, "generate 7-digit code")
+	flag8      = flag.Bool("8", false, "generate 8-digit code")
+	flagClip   = flag.Bool("clip", false, "copy code to the clipboard")
+	flagImport = flag.Bool("import", false, "import from stdin")
 )
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "usage:\n")
-	fmt.Fprintf(os.Stderr, "\t2fa -add [-7] [-8] [-hotp] keyname\n")
-	fmt.Fprintf(os.Stderr, "\t2fa -list\n")
-	fmt.Fprintf(os.Stderr, "\t2fa [-clip] keyname\n")
+	flag.Usage()
 	os.Exit(2)
 }
 
 func main() {
 	log.SetPrefix("2fa: ")
 	log.SetFlags(0)
-	flag.Usage = usage
 	flag.Parse()
 
-	var keyfile string = os.Getenv("KEYS_2FA")
-	if keyfile == "" {
-		home := os.Getenv("HOME")
-		if home != "" {
-			panic("neither $KEYS nor $HOME has been set")
-		}
-		keyfile = home + "/.2fa"
-	}
-	k := readKeychain(keyfile)
-	fmt.Println(k.file)
-	fmt.Println()
+	k := readKeychain()
 
+	if *flagImport {
+		b, err := ioutil.ReadAll(os.Stdin)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := k.importBytes(b); err != nil {
+			log.Fatal(err)
+		}
+	}
 	if *flagList {
 		if flag.NArg() != 0 {
 			usage()
@@ -162,21 +159,45 @@ type Key struct {
 
 const counterLen = 20
 
-func readKeychain(file string) *Keychain {
-	c := &Keychain{
-		file: file,
+func readKeychain() *Keychain {
+	k := &Keychain{
 		keys: make(map[string]Key),
 	}
-	data, err := ioutil.ReadFile(file)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return c
-		}
-		log.Fatal(err)
-	}
-	c.data = data
 
-	lines := bytes.SplitAfter(data, []byte("\n"))
+	switch keyfile := os.Getenv("KEYS_2FA"); keyfile {
+	case "":
+		b, err := queryKeychain()
+		if err == nil {
+			k.data = b
+			break
+		}
+
+		log.Println("system keychain:", err)
+		// to make sure $HOME is set
+		userAccount()
+		keyfile = os.Getenv("HOME") + "/.2fa"
+		fallthrough
+	default:
+		b, err := ioutil.ReadFile(keyfile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				f, err := os.OpenFile(keyfile, os.O_CREATE, 0600)
+				if err != nil {
+					log.Fatalf("could not create %s: %v", keyfile, err)
+				}
+				if err := f.Close(); err != nil {
+					log.Fatalf("could not close newly created %s: %v", keyfile, err)
+				}
+				return k
+			}
+			log.Fatalf("could not open %s: %v", keyfile, err)
+		}
+		fmt.Fprintf(os.Stderr, "%s\n\n", keyfile)
+		k.file = keyfile
+		k.data = b
+	}
+
+	lines := bytes.SplitAfter(k.data, []byte("\n"))
 	offset := 0
 	for i, line := range lines {
 		lineno := i + 1
@@ -186,38 +207,44 @@ func readKeychain(file string) *Keychain {
 			continue
 		}
 		if len(f) >= 3 && len(f[1]) == 1 && '6' <= f[1][0] && f[1][0] <= '8' {
-			var k Key
+			var k0 Key
 			name := string(f[0])
-			k.digits = int(f[1][0] - '0')
+			k0.digits = int(f[1][0] - '0')
 			raw, err := decodeKey(string(f[2]))
 			if err == nil {
-				k.raw = raw
+				k0.raw = raw
 				if len(f) == 3 {
-					c.keys[name] = k
+					k.keys[name] = k0
 					continue
 				}
 				if len(f) == 4 && len(f[3]) == counterLen {
 					_, err := strconv.ParseUint(string(f[3]), 10, 64)
 					if err == nil {
 						// Valid counter.
-						k.offset = offset - counterLen
+						k0.offset = offset - counterLen
 						if line[len(line)-1] == '\n' {
-							k.offset--
+							k0.offset--
 						}
-						c.keys[name] = k
+						k.keys[name] = k0
 						continue
 					}
 				}
 			}
 		}
-		log.Printf("%s:%d: malformed key", c.file, lineno)
+		log.Printf("%s:%d: malformed key", k.file, lineno)
 	}
-	return c
+	return k
 }
 
-func (c *Keychain) list() {
+func (k *Keychain) importBytes(b []byte) error {
+	item := keychainItem()
+	item.SetData(b)
+	return keychain.UpdateItem(item, item)
+}
+
+func (k *Keychain) list() {
 	var names []string
-	for name := range c.keys {
+	for name := range k.keys {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -233,7 +260,7 @@ func noSpace(r rune) rune {
 	return r
 }
 
-func (c *Keychain) add(name string) {
+func (k *Keychain) add(name string) {
 	size := 6
 	if *flag7 {
 		size = 7
@@ -260,63 +287,74 @@ func (c *Keychain) add(name string) {
 		line += " " + strings.Repeat("0", 20)
 	}
 	line += "\n"
-
-	f, err := os.OpenFile(c.file, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
-	if err != nil {
-		log.Fatalf("opening keychain: %v", err)
-	}
-	f.Chmod(0600)
-
-	if _, err := f.Write([]byte(line)); err != nil {
-		log.Fatalf("adding key: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		log.Fatalf("adding key: %v", err)
+	k.data = append(k.data, []byte(line)...)
+	if err := k.commit(); err != nil {
+		log.Fatal(err)
 	}
 }
 
-func (c *Keychain) code(name string) string {
-	k, ok := c.keys[name]
+func (k *Keychain) commit() error {
+	switch k.file {
+	case "":
+		item := keychainItem()
+		item.SetData(k.data)
+		if err := keychain.UpdateItem(item, item); err != nil {
+			return fmt.Errorf("keychain item update: %w", err)
+		}
+	default:
+		f, err := os.OpenFile(k.file, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0600)
+		if err != nil {
+			return fmt.Errorf("opening keychain file %s: %w", k.file, err)
+		}
+		if _, err := f.Write(k.data); err != nil {
+			return fmt.Errorf("adding key: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("adding key: %w", err)
+		}
+	}
+	return nil
+}
+
+func (k *Keychain) code(name string) string {
+	k0, ok := k.keys[name]
 	if !ok {
 		log.Fatalf("no such key %q", name)
 	}
 	var code int
-	if k.offset != 0 {
-		n, err := strconv.ParseUint(string(c.data[k.offset:k.offset+counterLen]), 10, 64)
+	if off := k0.offset; off != 0 {
+		n, err := strconv.ParseUint(string(k.data[off:off+counterLen]), 10, 64)
 		if err != nil {
-			log.Fatalf("malformed key counter for %q (%q)", name, c.data[k.offset:k.offset+counterLen])
+			log.Fatalf("malformed key counter for %q (%q)", name, k.data[off:off+counterLen])
 		}
 		n++
-		code = hotp(k.raw, n, k.digits)
-		f, err := os.OpenFile(c.file, os.O_RDWR, 0600)
-		if err != nil {
-			log.Fatalf("opening keychain: %v", err)
+		ctr := []byte(fmt.Sprintf("%0*d", counterLen, n))
+		k.data = append(k.data[:off], append(ctr, k.data[off+counterLen:]...)...)
+		if err := k.commit(); err != nil {
+			log.Fatal(err)
 		}
-		if _, err := f.WriteAt([]byte(fmt.Sprintf("%0*d", counterLen, n)), int64(k.offset)); err != nil {
-			log.Fatalf("updating keychain: %v", err)
-		}
-		if err := f.Close(); err != nil {
-			log.Fatalf("updating keychain: %v", err)
-		}
+		code = hotp(k0.raw, n, k0.digits)
 	} else {
 		// Time-based key.
-		code = totp(k.raw, time.Now(), k.digits)
+		code = totp(k0.raw, time.Now(), k0.digits)
 	}
-	return fmt.Sprintf("%0*d", k.digits, code)
+	return fmt.Sprintf("%0*d", k0.digits, code)
 }
 
-func (c *Keychain) show(name string) {
-	code := c.code(name)
+func (k *Keychain) show(name string) {
+	code := k.code(name)
 	if *flagClip {
-		clipboard.WriteAll(code)
+		if err := clipboard.WriteAll(code); err != nil {
+			log.Fatal(err)
+		}
 	}
 	fmt.Printf("%s\n", code)
 }
 
-func (c *Keychain) showAll() {
+func (k *Keychain) showAll() {
 	var names []string
 	max := 0
-	for name, k := range c.keys {
+	for name, k := range k.keys {
 		names = append(names, name)
 		if max < k.digits {
 			max = k.digits
@@ -324,10 +362,10 @@ func (c *Keychain) showAll() {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		k := c.keys[name]
-		code := strings.Repeat("-", k.digits)
-		if k.offset == 0 {
-			code = c.code(name)
+		k0 := k.keys[name]
+		code := strings.Repeat("-", k0.digits)
+		if k0.offset == 0 {
+			code = k.code(name)
 		}
 		fmt.Printf("%-*s\t%s\n", max, code, name)
 	}

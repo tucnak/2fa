@@ -1,0 +1,6 @@
+# github.com/atotto/clipboard v0.1.2
+## explicit
+github.com/atotto/clipboard
+# github.com/keybase/go-keychain v0.0.0-20220506172723-c18928ccd7f2
+## explicit
+github.com/keybase/go-keychain
